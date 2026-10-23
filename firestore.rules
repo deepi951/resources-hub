@@ -1,0 +1,590 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isStudent() {
+      return request.auth != null &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        string(get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role).lower() == 'student';
+    }
+
+    function isBlocked(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)) &&
+        string(get(/databases/$(database)/documents/users/$(userId)).data.status).lower() == 'blocked';
+    }
+
+    function isAdminUser(userId) {
+      return exists(/databases/$(database)/documents/users/$(userId)) &&
+        string(get(/databases/$(database)/documents/users/$(userId)).data.role).lower() == 'admin';
+    }
+
+    function isAdmin() {
+      return request.auth != null && isAdminUser(request.auth.uid);
+    }
+
+    match /products/{productId} {
+      allow read: if true;
+
+      allow create: if request.auth != null
+        && request.resource.data.sellerId == request.auth.uid
+        && isStudent()
+        && !isBlocked(request.auth.uid);
+
+      allow update: if request.auth != null && (
+        resource.data.sellerId == request.auth.uid || isAdmin()
+      ) && request.resource.data.sellerId == resource.data.sellerId;
+
+      allow delete: if request.auth != null && (
+        resource.data.sellerId == request.auth.uid || isAdmin()
+      );
+    }
+
+    match /users/{userId} {
+      allow read: if request.auth != null && (
+        request.auth.uid == userId || isAdmin()
+      );
+
+      allow create: if request.auth != null && (
+        request.auth.uid == userId
+        && request.resource.data.uid == userId
+        && request.resource.data.role == 'student'
+        && request.resource.data.status == 'active'
+        && request.resource.data.email is string
+        && (!request.resource.data.keys().hasAny(['phoneVerified']) || request.resource.data.phoneVerified == false)
+        && (!request.resource.data.keys().hasAny(['phoneVerifiedAt']) || request.resource.data.phoneVerifiedAt == null)
+      );
+
+      allow update: if request.auth != null && (
+        (
+          request.auth.uid == userId
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.email == resource.data.email
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.status == resource.data.status
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+            'fullName', 'displayName', 'department', 'block', 'registerNumber',
+            'phone', 'location', 'bio', 'yearOfStudy', 'updatedAt', 'phoneVerified', 'phoneVerifiedAt'
+          ])
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['phone']) || request.resource.data.phoneVerified == false)
+          && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['phoneVerified', 'phoneVerifiedAt']) || (
+            request.resource.data.diff(resource.data).affectedKeys().hasAny(['phone'])
+            && request.resource.data.phoneVerified == false
+            && request.resource.data.phoneVerifiedAt == null
+          ))
+        ) || (
+          isAdmin()
+          && request.resource.data.uid == resource.data.uid
+          && request.resource.data.email == resource.data.email
+          && request.resource.data.role == resource.data.role
+          && request.resource.data.status in ['active', 'blocked']
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt'])
+        )
+      );
+    }
+
+    match /purchaseGuards/{guardId} {
+      allow read: if request.auth != null && (
+        isAdmin() || (isStudent() && guardId.matches('^' + request.auth.uid + '_.*$')) || (
+        resource.data.buyerId == request.auth.uid ||
+        resource.data.sellerId == request.auth.uid
+        )
+      );
+
+      allow create: if isStudent()
+        && !isBlocked(request.auth.uid)
+        && request.resource.data.buyerId == request.auth.uid
+        && request.resource.data.productId is string
+        && request.resource.data.sellerId is string
+        && request.resource.data.requestId is string
+        && request.resource.data.orderId == null;
+
+      allow update: if request.auth != null && (
+        isAdmin() || (
+          resource.data.sellerId == request.auth.uid
+          && resource.data.buyerId == request.resource.data.buyerId
+          && resource.data.sellerId == request.resource.data.sellerId
+          && resource.data.productId == request.resource.data.productId
+          && resource.data.requestId == request.resource.data.requestId
+          && resource.data.orderId == null
+          && request.resource.data.orderId is string
+          && existsAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId))
+          && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.requestId == resource.data.requestId
+          && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.buyerId == resource.data.buyerId
+        )
+      );
+
+      allow delete: if request.auth != null && (
+        resource.data.sellerId == request.auth.uid || isAdmin()
+      );
+    }
+
+    match /purchaseRequests/{requestId} {
+      function requestIsForAuthenticatedBuyer() {
+        return isStudent()
+          && request.resource.data.buyerId == request.auth.uid
+          && request.resource.data.buyerId is string
+          && request.resource.data.sellerId is string
+          && request.resource.data.productId is string
+          && request.resource.data.productName is string
+          && request.resource.data.quantity is number
+          && request.resource.data.quantity > 0
+          && request.resource.data.unitPrice is number
+          && request.resource.data.unitPrice > 0
+          && request.resource.data.totalAmount is number
+          && request.resource.data.totalAmount == request.resource.data.unitPrice * request.resource.data.quantity
+          && request.resource.data.requestedPaymentMethod in ['cod', 'upi', 'both']
+          && request.resource.data.guardId is string
+          && request.resource.data.status == 'pending'
+          && !request.resource.data.keys().hasAny(['sellerUpiId', 'paymentStatus', 'orderStatus'])
+          && exists(/databases/$(database)/documents/products/$(request.resource.data.productId))
+          && get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data.sellerId == request.resource.data.sellerId
+          && get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data.price == request.resource.data.unitPrice
+          && existsAfter(/databases/$(database)/documents/purchaseGuards/$(request.resource.data.guardId))
+          && getAfter(/databases/$(database)/documents/purchaseGuards/$(request.resource.data.guardId)).data.buyerId == request.auth.uid;
+      }
+
+      allow read: if request.auth != null && (
+        resource.data.buyerId == request.auth.uid ||
+        resource.data.sellerId == request.auth.uid ||
+        isAdmin()
+      );
+
+      allow create: if requestIsForAuthenticatedBuyer();
+
+      allow create: if requestIsForAuthenticatedBuyer() && !isBlocked(request.auth.uid);
+
+      allow update: if request.auth != null && (
+        isAdmin() || resource.data.sellerId == request.auth.uid
+      ) && request.resource.data.buyerId == resource.data.buyerId
+        && request.resource.data.sellerId == resource.data.sellerId
+        && request.resource.data.productId == resource.data.productId
+        && request.resource.data.unitPrice == resource.data.unitPrice
+        && request.resource.data.totalAmount == resource.data.totalAmount
+        && resource.data.status == 'pending'
+        && request.resource.data.status in ['accepted', 'rejected']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'updatedAt', 'orderId'])
+        && (request.resource.data.status != 'accepted' || (
+          request.resource.data.orderId is string
+          && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.requestId == requestId
+          && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.sellerId == resource.data.sellerId
+          && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.buyerId == resource.data.buyerId
+        ))
+        && (request.resource.data.status != 'rejected' || (
+          !request.resource.data.keys().hasAny(['orderId'])
+          && !existsAfter(/databases/$(database)/documents/purchaseGuards/$(resource.data.guardId))
+        ));
+
+      allow delete: if false;
+    }
+
+    match /systemCounters/{counterId} {
+      function counterPointsToOrder() {
+        return request.resource.data.year is string
+          && counterId == 'orderNumbers-' + request.resource.data.year
+          && request.resource.data.lastNumber is int
+          && request.resource.data.lastNumber > 0
+          && request.resource.data.lastOrderId is string
+          && request.resource.data.lastDisplayOrderNumber is string
+          && request.resource.data.lastDisplayOrderNumber == 'RH-' + request.resource.data.year + '-' + string(request.resource.data.lastNumber)
+          && existsAfter(/databases/$(database)/documents/orders/$(request.resource.data.lastOrderId))
+          && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.lastOrderId)).data.displayOrderNumber == request.resource.data.lastDisplayOrderNumber
+          && getAfter(/databases/$(database)/documents/orders/$(request.resource.data.lastOrderId)).data.displayOrderYear == request.resource.data.year;
+      }
+
+      allow read: if isAdmin() || isStudent();
+
+      allow create: if (isAdmin() || isStudent())
+        && (isAdmin() || request.resource.data.lastNumber == 1)
+        && counterPointsToOrder()
+        && (isAdmin() || getAfter(/databases/$(database)/documents/orders/$(request.resource.data.lastOrderId)).data.sellerId == request.auth.uid);
+
+      allow update: if (isAdmin() || isStudent())
+        && request.resource.data.year == resource.data.year
+        && (isAdmin()
+          ? request.resource.data.lastNumber > resource.data.lastNumber
+          : request.resource.data.lastNumber == resource.data.lastNumber + 1)
+        && counterPointsToOrder()
+        && (isAdmin() || getAfter(/databases/$(database)/documents/orders/$(request.resource.data.lastOrderId)).data.sellerId == request.auth.uid)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastNumber', 'lastOrderId', 'lastDisplayOrderNumber', 'updatedAt']);
+
+      allow delete: if false;
+    }
+
+    match /orders/{orderId} {
+      function sellerCanCreateOrderForBuyer() {
+        return isStudent()
+          && request.resource.data.sellerId == request.auth.uid
+          && request.resource.data.buyerId is string
+          && request.resource.data.buyerId != request.resource.data.sellerId
+          && request.resource.data.sellerId is string
+          && request.resource.data.productId is string
+          && request.resource.data.productName is string
+          && request.resource.data.quantity is number
+          && request.resource.data.quantity > 0
+          && request.resource.data.unitPrice is number
+          && request.resource.data.unitPrice > 0
+          && request.resource.data.totalAmount is number
+          && request.resource.data.totalAmount == request.resource.data.unitPrice * request.resource.data.quantity
+          && request.resource.data.paymentMethod in ['cod', 'upi', 'both']
+          && request.resource.data.paymentStatus in ['pending', 'awaiting_payment', 'buyer_claimed', 'paid', 'payment_not_received']
+          && request.resource.data.orderStatus in ['confirmed_cod', 'awaiting_payment', 'awaiting_seller_confirmation', 'confirmed', 'payment_issue']
+          && request.resource.data.displayOrderNumber is string
+          && request.resource.data.displayOrderYear is string
+          && existsAfter(/databases/$(database)/documents/systemCounters/$('orderNumbers-' + request.resource.data.displayOrderYear))
+          && getAfter(/databases/$(database)/documents/systemCounters/$('orderNumbers-' + request.resource.data.displayOrderYear)).data.lastOrderId == orderId
+          && getAfter(/databases/$(database)/documents/systemCounters/$('orderNumbers-' + request.resource.data.displayOrderYear)).data.lastDisplayOrderNumber == request.resource.data.displayOrderNumber
+          && request.resource.data.requestId is string
+          && existsAfter(/databases/$(database)/documents/purchaseRequests/$(request.resource.data.requestId))
+          && getAfter(/databases/$(database)/documents/purchaseRequests/$(request.resource.data.requestId)).data.status == 'accepted'
+          && getAfter(/databases/$(database)/documents/purchaseRequests/$(request.resource.data.requestId)).data.orderId == orderId
+          && getAfter(/databases/$(database)/documents/purchaseRequests/$(request.resource.data.requestId)).data.buyerId == request.resource.data.buyerId
+          && getAfter(/databases/$(database)/documents/purchaseRequests/$(request.resource.data.requestId)).data.sellerId == request.auth.uid
+          && getAfter(/databases/$(database)/documents/purchaseRequests/$(request.resource.data.requestId)).data.productId == request.resource.data.productId
+          && getAfter(/databases/$(database)/documents/purchaseRequests/$(request.resource.data.requestId)).data.quantity == request.resource.data.quantity
+          && getAfter(/databases/$(database)/documents/purchaseRequests/$(request.resource.data.requestId)).data.unitPrice == request.resource.data.unitPrice
+          && getAfter(/databases/$(database)/documents/purchaseRequests/$(request.resource.data.requestId)).data.totalAmount == request.resource.data.totalAmount
+          && getAfter(/databases/$(database)/documents/purchaseRequests/$(request.resource.data.requestId)).data.requestedPaymentMethod == request.resource.data.paymentMethod
+          && exists(/databases/$(database)/documents/products/$(request.resource.data.productId))
+          && get(/databases/$(database)/documents/products/$(request.resource.data.productId)).data.sellerId == request.auth.uid;
+      }
+
+      allow read: if request.auth != null && (
+        resource.data.buyerId == request.auth.uid ||
+        resource.data.sellerId == request.auth.uid ||
+        isAdmin()
+      );
+
+      allow create: if sellerCanCreateOrderForBuyer() && !isBlocked(request.auth.uid);
+
+      allow update: if request.auth != null && (
+        (isAdmin()
+          && (!resource.data.keys().hasAny(['displayOrderNumber']) || resource.data.displayOrderNumber == null || resource.data.displayOrderNumber == '')
+          && request.resource.data.displayOrderNumber is string
+          && request.resource.data.displayOrderYear is string
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['displayOrderNumber', 'displayOrderYear'])
+          && existsAfter(/databases/$(database)/documents/systemCounters/$('orderNumbers-' + request.resource.data.displayOrderYear))
+          && getAfter(/databases/$(database)/documents/systemCounters/$('orderNumbers-' + request.resource.data.displayOrderYear)).data.lastOrderId == orderId
+          && getAfter(/databases/$(database)/documents/systemCounters/$('orderNumbers-' + request.resource.data.displayOrderYear)).data.lastDisplayOrderNumber == request.resource.data.displayOrderNumber)
+        || (
+          request.auth.uid == resource.data.buyerId
+          && request.resource.data.buyerId == resource.data.buyerId
+          && request.resource.data.sellerId == resource.data.sellerId
+          && request.resource.data.productId == resource.data.productId
+          && request.resource.data.totalAmount == resource.data.totalAmount
+          && resource.data.orderStatus == 'awaiting_payment'
+          && request.resource.data.paymentStatus == 'buyer_claimed'
+          && request.resource.data.orderStatus == 'awaiting_seller_confirmation'
+          && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.status == 'buyer_claimed'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paymentStatus', 'orderStatus', 'paymentClaimedAt', 'updatedAt'])
+        ) || (
+          request.auth.uid == resource.data.buyerId
+          && request.resource.data.buyerId == resource.data.buyerId
+          && request.resource.data.sellerId == resource.data.sellerId
+          && request.resource.data.productId == resource.data.productId
+          && request.resource.data.totalAmount == resource.data.totalAmount
+          && request.resource.data.paymentStatus == 'paid'
+          && request.resource.data.orderStatus == 'confirmed'
+          && resource.data.orderStatus == 'awaiting_payment'
+          && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.status == 'success'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paymentStatus', 'orderStatus', 'paidAt', 'updatedAt'])
+        ) || (
+          request.auth.uid == resource.data.sellerId
+          && request.resource.data.buyerId == resource.data.buyerId
+          && request.resource.data.sellerId == resource.data.sellerId
+          && request.resource.data.productId == resource.data.productId
+          && resource.data.orderStatus == 'awaiting_seller_confirmation'
+          && resource.data.paymentStatus == 'buyer_claimed'
+          && request.resource.data.orderStatus == 'handover_pending'
+          && request.resource.data.paymentStatus == 'paid'
+          && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.status == 'paid'
+          && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.confirmedBy == request.auth.uid
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['paymentStatus', 'orderStatus', 'paidAt', 'updatedAt'])
+        ) || (
+          request.auth.uid == resource.data.sellerId
+          && request.resource.data.buyerId == resource.data.buyerId
+          && request.resource.data.sellerId == resource.data.sellerId
+          && request.resource.data.productId == resource.data.productId
+          && resource.data.orderStatus in ['confirmed', 'confirmed_cod', 'handover_pending']
+          && request.resource.data.orderStatus == 'completed'
+          && request.resource.data.paymentStatus == 'paid'
+          && (resource.data.paymentMethod == 'cod'
+            ? getAfter(/databases/$(database)/documents/payments/$(orderId)).data.status == 'success'
+              && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.method == 'cash_on_delivery'
+              && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.buyerId == resource.data.buyerId
+              && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.sellerId == resource.data.sellerId
+              && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.productId == resource.data.productId
+              && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.amount == resource.data.totalAmount
+            : resource.data.paymentStatus == 'paid'
+              && request.resource.data.paymentStatus == resource.data.paymentStatus
+              && (!existsAfter(/databases/$(database)/documents/payments/$(orderId)) || (
+                getAfter(/databases/$(database)/documents/payments/$(orderId)).data.status in ['paid', 'success']
+                && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.buyerId == resource.data.buyerId
+                && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.sellerId == resource.data.sellerId
+                && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.productId == resource.data.productId
+                && getAfter(/databases/$(database)/documents/payments/$(orderId)).data.amount == resource.data.totalAmount
+              )))
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['orderStatus', 'completedAt', 'updatedAt', 'paymentStatus', 'paidAt'])
+        ) || (
+          request.auth.uid == resource.data.sellerId
+          && resource.data.orderStatus == 'completed'
+          && request.resource.data.orderStatus == 'returned'
+          && getAfter(/databases/$(database)/documents/returns/$(orderId)).data.status == 'RETURNED'
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['orderStatus', 'returnedAt', 'updatedAt'])
+        )
+      );
+
+      allow delete: if false;
+    }
+
+    match /payments/{orderId} {
+      allow read: if request.auth != null && (
+        isAdmin() || resource.data.buyerId == request.auth.uid || resource.data.sellerId == request.auth.uid || (
+          exists(/databases/$(database)/documents/orders/$(orderId)) &&
+          (get(/databases/$(database)/documents/orders/$(orderId)).data.buyerId == request.auth.uid ||
+            get(/databases/$(database)/documents/orders/$(orderId)).data.sellerId == request.auth.uid)
+        )
+      );
+
+      allow create: if (
+        isStudent()
+        && !isBlocked(request.auth.uid)
+        && request.resource.data.orderId == orderId
+        && request.resource.data.transactionId == orderId
+        && request.resource.data.buyerId == request.auth.uid
+        && request.resource.data.method == 'upi_demo'
+        && request.resource.data.demo == true
+        && request.resource.data.status == 'pending'
+        && exists(/databases/$(database)/documents/orders/$(orderId))
+        && get(/databases/$(database)/documents/orders/$(orderId)).data.buyerId == request.auth.uid
+        && get(/databases/$(database)/documents/orders/$(orderId)).data.paymentMethod in ['upi', 'both']
+        && get(/databases/$(database)/documents/orders/$(orderId)).data.orderStatus == 'awaiting_payment'
+        && request.resource.data.sellerId == get(/databases/$(database)/documents/orders/$(orderId)).data.sellerId
+        && request.resource.data.productId == get(/databases/$(database)/documents/orders/$(orderId)).data.productId
+        && get(/databases/$(database)/documents/orders/$(orderId)).data.totalAmount == request.resource.data.amount
+      ) || (
+        isStudent()
+        && request.resource.data.orderId == orderId
+        && request.resource.data.transactionId == orderId
+        && request.resource.data.sellerId == request.auth.uid
+        && request.resource.data.method == 'cash_on_delivery'
+        && request.resource.data.demo == false
+        && request.resource.data.status == 'success'
+        && request.resource.data.confirmedBy == request.auth.uid
+        && request.resource.data.buyerId == getAfter(/databases/$(database)/documents/orders/$(orderId)).data.buyerId
+        && request.resource.data.productId == getAfter(/databases/$(database)/documents/orders/$(orderId)).data.productId
+        && existsAfter(/databases/$(database)/documents/orders/$(orderId))
+        && getAfter(/databases/$(database)/documents/orders/$(orderId)).data.sellerId == request.auth.uid
+        && getAfter(/databases/$(database)/documents/orders/$(orderId)).data.paymentMethod == 'cod'
+        && getAfter(/databases/$(database)/documents/orders/$(orderId)).data.paymentStatus == 'paid'
+        && getAfter(/databases/$(database)/documents/orders/$(orderId)).data.orderStatus == 'completed'
+        && getAfter(/databases/$(database)/documents/orders/$(orderId)).data.totalAmount == request.resource.data.amount
+      );
+
+      allow update: if request.auth != null && (
+        (
+          resource.data.buyerId == request.auth.uid
+          && request.resource.data.buyerId == resource.data.buyerId
+          && request.resource.data.sellerId == resource.data.sellerId
+          && request.resource.data.productId == resource.data.productId
+          && request.resource.data.orderId == resource.data.orderId
+          && request.resource.data.transactionId == resource.data.transactionId
+          && request.resource.data.amount == resource.data.amount
+          && request.resource.data.method == 'upi_demo'
+          && request.resource.data.demo == true
+          && resource.data.status in ['pending', 'failed', 'cancelled']
+          && request.resource.data.status in ['pending', 'buyer_claimed', 'success', 'failed', 'cancelled']
+          && (
+            request.resource.data.status == 'buyer_claimed'
+              ? getAfter(/databases/$(database)/documents/orders/$(orderId)).data.paymentStatus == 'buyer_claimed'
+                && getAfter(/databases/$(database)/documents/orders/$(orderId)).data.orderStatus == 'awaiting_seller_confirmation'
+              : request.resource.data.status != 'success' || (
+                getAfter(/databases/$(database)/documents/orders/$(orderId)).data.paymentStatus == 'paid'
+                && getAfter(/databases/$(database)/documents/orders/$(orderId)).data.orderStatus == 'confirmed'
+              )
+          )
+        ) || (
+          resource.data.sellerId == request.auth.uid
+          && request.resource.data.sellerId == resource.data.sellerId
+          && request.resource.data.buyerId == resource.data.buyerId
+          && request.resource.data.productId == resource.data.productId
+          && request.resource.data.orderId == orderId
+          && request.resource.data.transactionId == resource.data.transactionId
+          && request.resource.data.amount == resource.data.amount
+          && request.resource.data.method == 'upi_demo'
+          && request.resource.data.demo == true
+          && resource.data.status == 'buyer_claimed'
+          && request.resource.data.status == 'paid'
+          && request.resource.data.confirmedBy == request.auth.uid
+          && getAfter(/databases/$(database)/documents/orders/$(orderId)).data.paymentStatus == 'paid'
+          && getAfter(/databases/$(database)/documents/orders/$(orderId)).data.orderStatus == 'handover_pending'
+        )
+      );
+
+      allow delete: if false;
+    }
+
+    match /returns/{orderId} {
+      allow read: if request.auth != null && (
+        isAdmin() ||
+        resource.data.buyerId == request.auth.uid ||
+        resource.data.sellerId == request.auth.uid || (
+          exists(/databases/$(database)/documents/orders/$(orderId)) && (
+            get(/databases/$(database)/documents/orders/$(orderId)).data.buyerId == request.auth.uid ||
+            get(/databases/$(database)/documents/orders/$(orderId)).data.sellerId == request.auth.uid
+          )
+        )
+      );
+
+      allow create: if isStudent()
+        && !isBlocked(request.auth.uid)
+        && request.resource.data.orderId == orderId
+        && request.resource.data.buyerId == request.auth.uid
+        && request.resource.data.sellerId is string
+        && request.resource.data.buyerName is string
+        && (request.resource.data.buyerPhone == null || request.resource.data.buyerPhone is string)
+        && (request.resource.data.sellerPhone == null || request.resource.data.sellerPhone is string)
+        && request.resource.data.productId is string
+        && request.resource.data.productName is string
+        && request.resource.data.status == 'REQUESTED'
+        && request.resource.data.reason is string
+        && request.resource.data.description is string
+        && exists(/databases/$(database)/documents/orders/$(orderId))
+        && get(/databases/$(database)/documents/orders/$(orderId)).data.buyerId == request.auth.uid
+        && get(/databases/$(database)/documents/orders/$(orderId)).data.orderStatus == 'completed'
+        && get(/databases/$(database)/documents/orders/$(orderId)).data.sellerId == request.resource.data.sellerId
+        && get(/databases/$(database)/documents/orders/$(orderId)).data.productId == request.resource.data.productId
+        && (get(/databases/$(database)/documents/orders/$(orderId)).data.keys().hasAny(['completedAt'])
+          ? request.time <= get(/databases/$(database)/documents/orders/$(orderId)).data.completedAt + duration.value(7, 'd')
+          : request.time <= get(/databases/$(database)/documents/orders/$(orderId)).data.updatedAt + duration.value(7, 'd'));
+
+      allow update: if request.auth != null && (
+        isAdmin() || request.auth.uid == resource.data.sellerId
+      )
+        && request.resource.data.buyerId == resource.data.buyerId
+        && request.resource.data.sellerId == resource.data.sellerId
+        && request.resource.data.productId == resource.data.productId
+        && request.resource.data.orderId == resource.data.orderId
+        && ((resource.data.status == 'REQUESTED' && request.resource.data.status in ['APPROVED', 'REJECTED', 'CONTACT_REQUESTED', 'PICKUP_PENDING'])
+          || (resource.data.status in ['APPROVED', 'CONTACT_REQUESTED', 'PICKUP_PENDING'] && request.resource.data.status == 'RETURNED'))
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+          'status', 'reviewedBy', 'updatedAt', 'sellerPhone', 'sellerName',
+          'sellerMessage', 'contactRequestedAt', 'pickupRequestedAt',
+          'sellerRespondedAt', 'returnedAt'
+        ]);
+
+      allow delete: if false;
+    }
+
+    match /reviews/{transactionId} {
+      allow read: if true;
+      allow create: if isStudent()
+        && !isBlocked(request.auth.uid)
+        && request.resource.data.transactionId == transactionId
+        && request.resource.data.reviewerId == request.auth.uid
+        && request.resource.data.rating is int
+        && request.resource.data.rating >= 1
+        && request.resource.data.rating <= 5
+        && request.resource.data.comment is string
+        && exists(/databases/$(database)/documents/orders/$(transactionId))
+        && get(/databases/$(database)/documents/orders/$(transactionId)).data.buyerId == request.auth.uid
+        && get(/databases/$(database)/documents/orders/$(transactionId)).data.orderStatus == 'completed'
+        && get(/databases/$(database)/documents/orders/$(transactionId)).data.productId == request.resource.data.resourceId
+        && get(/databases/$(database)/documents/orders/$(transactionId)).data.sellerId == request.resource.data.sellerId;
+      allow update, delete: if false;
+    }
+
+    match /notifications/{notificationId} {
+      function isValidReportModerationNotification() {
+        return isStudent()
+          && !isBlocked(request.auth.uid)
+          && request.resource.data.reporterId == request.auth.uid
+          && request.resource.data.buyerId == request.auth.uid
+          && request.resource.data.sellerId is string
+          && request.resource.data.productId is string
+          && request.resource.data.orderId is string
+          && request.resource.data.reportId is string
+          && request.resource.data.recipientId is string
+          && exists(/databases/$(database)/documents/users/$(request.resource.data.recipientId))
+          && get(/databases/$(database)/documents/users/$(request.resource.data.recipientId)).data.role == 'admin'
+          && existsAfter(/databases/$(database)/documents/reports/$(request.resource.data.reportId))
+          && getAfter(/databases/$(database)/documents/reports/$(request.resource.data.reportId)).data.reporterId == request.auth.uid
+          && getAfter(/databases/$(database)/documents/reports/$(request.resource.data.reportId)).data.buyerId == request.auth.uid
+          && getAfter(/databases/$(database)/documents/reports/$(request.resource.data.reportId)).data.productId == request.resource.data.productId
+          && getAfter(/databases/$(database)/documents/reports/$(request.resource.data.reportId)).data.orderId == request.resource.data.orderId
+          && getAfter(/databases/$(database)/documents/reports/$(request.resource.data.reportId)).data.sellerId == request.resource.data.sellerId
+          && getAfter(/databases/$(database)/documents/reports/$(request.resource.data.reportId)).data.status == 'OPEN';
+      }
+
+      allow read: if request.auth != null && (
+        resource.data.recipientId == request.auth.uid ||
+        isAdmin()
+      );
+
+      allow create: if request.auth != null
+        && request.resource.data.type == 'new_report'
+        && isValidReportModerationNotification()
+        && request.resource.data.title is string
+        && request.resource.data.message is string;
+
+      allow create: if request.auth != null
+        && request.resource.data.type is string
+        && request.resource.data.type != 'new_report'
+        && (
+          request.resource.data.buyerId == request.auth.uid && request.resource.data.recipientId == request.resource.data.sellerId
+          || request.resource.data.sellerId == request.auth.uid && request.resource.data.recipientId == request.resource.data.buyerId
+          || request.resource.data.recipientId == request.auth.uid
+          || isAdmin()
+        )
+        && request.resource.data.title is string
+        && request.resource.data.message is string;
+
+      allow update, delete: if request.auth != null && (
+        resource.data.recipientId == request.auth.uid ||
+        isAdmin()
+      );
+    }
+
+    match /reports/{reportId} {
+      allow read: if request.auth != null && (
+        isAdmin() ||
+        resource.data.reporterId == request.auth.uid ||
+        resource.data.reportedUserId == request.auth.uid ||
+        resource.data.buyerId == request.auth.uid
+      );
+
+      allow create: if isStudent()
+        && !isBlocked(request.auth.uid)
+        && request.resource.data.reporterId == request.auth.uid
+        && request.resource.data.buyerId == request.auth.uid
+        && request.resource.data.reportedUserId is string
+        && request.resource.data.sellerId is string
+        && request.resource.data.productId is string
+        && request.resource.data.orderId is string
+        && request.resource.data.productName is string
+        && request.resource.data.reason is string
+        && request.resource.data.description is string
+        && request.resource.data.description.size() > 0
+        && request.resource.data.status == 'OPEN'
+        && exists(/databases/$(database)/documents/orders/$(request.resource.data.orderId))
+        && get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.buyerId == request.auth.uid
+        && get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.buyerId == request.resource.data.buyerId
+        && get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.sellerId == request.resource.data.sellerId
+        && get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.productId == request.resource.data.productId
+        && get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.productName == request.resource.data.productName
+        && request.resource.data.reportedUserId == get(/databases/$(database)/documents/orders/$(request.resource.data.orderId)).data.sellerId;
+
+      allow update: if isAdmin()
+        && request.resource.data.reporterId == resource.data.reporterId
+        && request.resource.data.productId == resource.data.productId
+        && request.resource.data.reportedUserId == resource.data.reportedUserId
+        && request.resource.data.orderId == resource.data.orderId
+        && request.resource.data.reason == resource.data.reason
+        && request.resource.data.description == resource.data.description
+        && resource.data.status in ['OPEN', 'UNDER_REVIEW']
+        && request.resource.data.status in ['UNDER_REVIEW', 'RESOLVED', 'REJECTED']
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'reviewedBy', 'updatedAt']);
+
+      allow delete: if false;
+    }
+  }
+}
