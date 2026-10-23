@@ -34,6 +34,26 @@ Requirements: Node.js, a Firebase project for student accounts and marketplace d
 
 Open the local URL printed by Vite. Do not commit `.env` or put private credentials in client-side environment variables. The Firebase web app config is used by the browser; secure access with Firebase Rules.
 
+## Deploy the web app
+
+1. Install the Firebase CLI and sign in with an account that can deploy to the Firebase project:
+
+   ```sh
+   npm install -g firebase-tools
+   firebase login
+   ```
+
+2. Set the production Firebase web-app and Cloudinary values in a local `.env` file. Do not commit `.env`; Vite embeds `VITE_` values in the public client bundle, so only use browser-safe Firebase configuration and an unsigned, restricted Cloudinary upload preset.
+3. Build and deploy Hosting from the project root:
+
+   ```sh
+   npm run build
+   firebase deploy --only hosting --project YOUR_FIREBASE_PROJECT_ID
+   ```
+
+   The Firebase Hosting configuration serves the `dist` build. Firebase prints the public URL after deployment. Configure that domain in Firebase Authentication's authorized domains if it is not already listed.
+4. Deploy Firestore rules and Cloud Functions separately with `npm run deploy:functions` after configuring the Firebase Functions secrets and production email/SMS providers described below. Password recovery and phone verification require those functions; the public website can be hosted independently.
+
 ## Secure password recovery setup
 
 Password recovery uses a custom, one-time email link and a required SMS OTP. Firebase's standard password-reset action code can be submitted directly to Firebase to change the password, so it cannot enforce this additional factor. Instead, the trusted callable backend validates the one-time email capability and uses Firebase Admin Authentication to update the password only after both factors pass. It reads the user's verified profile phone and checks OTPs through Twilio Verify. No SMS credentials or reset secrets belong in the Vite environment.
